@@ -1,52 +1,121 @@
 package twitter
 
 import (
-	"fmt"
+	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/spf13/cast"
-
 	"github.com/go-resty/resty/v2"
 )
 
+type TweetType string
+
 const (
-	LoggerPrefix = "[TwitterClient]"
+	// Twitter graphql API URL
+	TweetDetailURL      = "https://x.com/i/api/graphql/U0HTv-bAWTBYylwEMT7x5A/TweetDetail"
+	UserTweetsURL       = "https://x.com/i/api/graphql/QWF3SzpHmykQHsQMixG0cg/UserTweets"
+	UserFollowingURL    = "https://x.com/i/api/graphql/7oQrdmth4zE3EtD42ZxgOA/Following"
+	UserInfoURL         = "https://x.com/i/api/graphql/QGIw94L0abhuohrr76cSbw/UserByScreenName"
+	UserFollowersURL    = "https://x.com/i/api/graphql/r4fuEJKOqqzaYcvJU5ZWVA/Followers"
+	UsersByRestIdsURL   = "https://x.com/i/api/graphql/JnwU1UO8J1tWlOJktPZIzg/UsersByRestIds"
+	TweetResultByRestId = "https://x.com/i/api/graphql/zptD3jqLJ0arTQdM10uc3w/TweetResultByRestId"
+	UserByRestIdURL     = "https://x.com/i/api/graphql/7oQrdmth4zE3EtD42ZxgOA/UserByRestId"
+
+	// Timeline instruction typename
+	TimelineAddEntries = "TimelineAddEntries"
+
+	// Tweet entry type
+	TimelineTimelineItem   string = "TimelineTimelineItem"
+	TimelineTimelineModule string = "TimelineTimelineModule"
+	TimelineTimelineCursor string = "TimelineTimelineCursor"
+
+	ConversationTweetPrefix string = "profile-conversation-"
+	CursorBottomPrefix      string = "cursor-bottom-"
+
+	// Tweet created time format
+	TimeFormat = time.RubyDate
+
+	// Twitter account status
+	UserUnavailable = "UserUnavailable"
+	Protected       = "Protected"
+
+	// tweet type
+	Post   TweetType = "Post"
+	Reply  TweetType = "Reply"
+	Repost TweetType = "Repost"
+	Quote  TweetType = "Quote"
 )
 
-type TwitterClient struct {
-	RestyClient *resty.Client
-}
-
-func NewTwitterClient(headers map[string]string) *TwitterClient {
-	return &TwitterClient{
-		RestyClient: resty.New().SetTimeout(10 * time.Second).SetHeaders(headers),
+var (
+	CommonRequestHeaders = map[string]string{
+		"authorization":             "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+		"content-type":              "application/json",
+		"x-twitter-active-user":     "yes",
+		"x-twitter-client-language": "en",
+		"user-agent":                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 	}
+)
+
+type RequestParams interface {
+	MarshalJsonWithDefaultValue() ([]byte, error)
 }
 
-func (c *TwitterClient) generateReqURL(baseURL string, variables, features, fieldToggles twitterAPIParams) (string, error) {
+type TwitterClient struct {
+	httpCli *resty.Client
+}
+
+func NewTwitterClient(a *Account) (*TwitterClient, error) {
+	cookiejar, _ := cookiejar.New(nil)
+	httpCli := resty.New().SetCookieJar(cookiejar).SetHeaders(CommonRequestHeaders).SetTimeout(RequestTimeout).SetDebug(true)
+	if !a.isAccountLogin() {
+		err := a.Login(httpCli)
+		if err != nil {
+			return nil, errors.Wrap(err, "TwitterClient NewTwitterClient Login Error")
+		}
+	}
+	headers := map[string]string{
+		"x-csrf-token":        a.Cookies["ct0"].Value,
+		"cookie":              a.GetRequestCookie(),
+		"x-twitter-auth-type": "OAuth2Session",
+	}
+	httpCli.SetHeaders(headers)
+	return &TwitterClient{
+		httpCli: httpCli,
+	}, nil
+}
+
+func (c *TwitterClient) SetCookies(cookies []*http.Cookie) {
+	c.httpCli.SetCookies(cookies)
+}
+
+func (c *TwitterClient) SetHeaders(headers map[string]string) {
+	c.httpCli.SetHeaders(headers)
+}
+
+func (c *TwitterClient) generateReqURL(baseURL string, variables, features, fieldToggles RequestParams) (string, error) {
 	variablesJSON, err := variables.MarshalJsonWithDefaultValue()
 	if err != nil {
-		return "", errors.Wrap(err, "TwitterClient generateReqURL variables.MarshalJsonWithDefaultValue error")
+		return "", errors.Wrapf(err, "Marshaling variables to JSON failed, baseURL: %s, variables: %v", baseURL, variables)
 	}
 
 	featuresJSON, err := features.MarshalJsonWithDefaultValue()
 	if err != nil {
-		return "", errors.Wrap(err, "TwitterClient generateReqURL features.MarshalJsonWithDefaultValue error")
+		return "", errors.Wrapf(err, "Marshaling features to JSON failed, baseURL: %s, features: %v", baseURL, features)
 	}
 
 	fieldTogglesJSON := []byte{}
 	if fieldToggles != nil {
 		fieldTogglesJSON, err = fieldToggles.MarshalJsonWithDefaultValue()
 		if err != nil {
-			return "", errors.Wrap(err, "TwitterClient generateReqURL fieldToggles.MarshalJsonWithDefaultValue error")
+			return "", errors.Wrapf(err, "Marshaling fieldToggles to JSON failed, baseURL: %s, fieldToggles: %v", baseURL, fieldToggles)
 		}
 	}
 
 	reqURL, err := url.Parse(baseURL)
 	if err != nil {
-		return "", errors.Wrap(err, "TwitterClient generateReqURL url.Parse error")
+		return "", errors.Wrapf(err, "Parse baseURL failed, baseURL: %s", baseURL)
 	}
 
 	query := reqURL.Query()
@@ -55,114 +124,6 @@ func (c *TwitterClient) generateReqURL(baseURL string, variables, features, fiel
 	if string(fieldTogglesJSON) != "" {
 		query.Set("fieldToggles", string(fieldTogglesJSON))
 	}
-	// log.Info(query)
 	reqURL.RawQuery = query.Encode()
 	return reqURL.String(), nil
-}
-
-func (c *TwitterClient) GetUserTweets(query *TimeLineReqVariables) (resp *UserTweetsResponse, err error) {
-	resp = &UserTweetsResponse{}
-	features := &CommonReqFeatures{}
-	reqURL, err := c.generateReqURL(UserTweetsGraphqlURL, query, features, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "TwitterClient generateReqURL Error")
-	}
-
-	userTweetsResp := &TimeLineResponse{}
-	req, err := c.RestyClient.R().SetResult(userTweetsResp).Get(reqURL)
-	if err != nil {
-		fmt.Println("Fetched User Tweets Failed, TwitterID: %s, Response Status: %d, resp: %s",
-			query.UserID, req.StatusCode(), req.String())
-		return nil, errors.Wrap(err, "TwitterClient Request GetUserTweets error")
-	}
-	// fmt.Println("req status: %d, resp: %s", req.StatusCode(), req.String())
-
-	headers := req.Header()
-
-	fmt.Println(
-		"Fetched User Tweets Successful, TwitterID: %s, Response Status: %d, Header: limit: %s, reset: %s, time: %s, remaining: %s",
-		query.UserID, req.StatusCode(),
-		headers.Get("X-Rate-Limit-Limit"), headers.Get("X-Rate-Limit-Reset"),
-		headers.Get("X-Response-Time"), headers.Get("X-Rate-Limit-Remaining"),
-	)
-
-	resp.RateLimit = &RateLimit{
-		XRateLimitLimit:     cast.ToInt64(headers.Get("X-Rate-Limit-Limit")),
-		XRateLimitReset:     cast.ToInt64(headers.Get("X-Rate-Limit-Reset")),
-		XResponseTime:       cast.ToInt64(headers.Get("X-Response-Time")),
-		XRateLimitRemaining: cast.ToInt64(headers.Get("X-Rate-Limit-Remaining")),
-	}
-	resp.StatusCode = req.StatusCode()
-	resp.Data = userTweetsResp
-	return resp, nil
-}
-
-func (c *TwitterClient) GetUserTweetDetail(tweetID string) (resp *TweetResponse, err error) {
-	resp = &TweetResponse{}
-	variables := TweetDetailReqVariables{
-		FocalTweetId: tweetID,
-	}
-	features := &CommonReqFeatures{}
-	fieldToggles := &FieldToggles{}
-	reqURL, err := c.generateReqURL(TweetDetailGraphqlURL, &variables, features, fieldToggles)
-	if err != nil {
-		return nil, errors.Wrap(err, "TwitterClient generateReqURL error")
-	}
-
-	tweetDetailResp := &TweetDetailResponse{}
-	req, err := c.RestyClient.R().SetResult(&tweetDetailResp).Get(reqURL)
-	if err != nil {
-		return nil, errors.Wrap(err, "TwitterClient Request GetUserTweets error")
-	}
-	headers := req.Header()
-	fmt.Println(
-		"Header: limit: %s, reset: %s, time: %s, remaining: %s",
-		headers.Get("X-Rate-Limit-Limit"), headers.Get("X-Rate-Limit-Reset"),
-		headers.Get("X-Response-Time"), headers.Get("X-Rate-Limit-Remaining"),
-	)
-
-	resp.RateLimit = &RateLimit{
-		XRateLimitLimit:     cast.ToInt64(headers.Get("x-rate-limit-limit")),
-		XRateLimitReset:     cast.ToInt64(headers.Get("x-rate-limit-reset")),
-		XResponseTime:       cast.ToInt64(headers.Get("x-response-time")),
-		XRateLimitRemaining: cast.ToInt64(headers.Get("x-rate-limit-remaining")),
-	}
-	resp.StatusCode = req.StatusCode()
-	resp.Data = tweetDetailResp
-	return resp, nil
-}
-
-func (c *TwitterClient) GetUserFollowing(query *FollowingReqVariables) (resp *FollowingResp, err error) {
-	resp = &FollowingResp{}
-	features := &FollowingReqFeatures{}
-	reqURL, err := c.generateReqURL(UserFollowGraphqlURL, query, features, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "TwitterClient generateReqURL Error")
-	}
-
-	followListResp := &FollowListResp{}
-	req, err := c.RestyClient.R().SetResult(followListResp).Get(reqURL)
-	if err != nil {
-		fmt.Println("Fetched User Following Failed, TwitterID: %s, Response Status: %d, resp: %s",
-			query.UserID, req.StatusCode(), req.String())
-		return nil, errors.Wrap(err, "TwitterClient Request GetUserTweets error")
-	}
-	headers := req.Header()
-	fmt.Println(
-		"Fetched User Following Successful, TwitterID: %s, Response Status: %d, Header: limit: %s, reset: %s, time: %s, remaining: %s",
-		query.UserID, req.StatusCode(),
-		headers.Get("X-Rate-Limit-Limit"), headers.Get("X-Rate-Limit-Reset"),
-		headers.Get("X-Response-Time"), headers.Get("X-Rate-Limit-Remaining"),
-	)
-
-	// fmt.Println("req status: %d, resp: %s", req.StatusCode(), req.String())
-	resp.RateLimit = &RateLimit{
-		XRateLimitLimit:     cast.ToInt64(headers.Get("X-Rate-Limit-Limit")),
-		XRateLimitReset:     cast.ToInt64(headers.Get("X-Rate-Limit-Reset")),
-		XResponseTime:       cast.ToInt64(headers.Get("X-Response-Time")),
-		XRateLimitRemaining: cast.ToInt64(headers.Get("X-Rate-Limit-Remaining")),
-	}
-	resp.StatusCode = req.StatusCode()
-	resp.Data = followListResp
-	return resp, nil
 }

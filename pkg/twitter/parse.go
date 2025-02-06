@@ -8,8 +8,35 @@ import (
 	"github.com/spf13/cast"
 )
 
-func ParseUserTweets(userTweetResp *UserTweetsResponse) (tweets *UserTweets, err error) {
-	tweets = &UserTweets{}
+type TweetComment struct {
+	UserID     string
+	ScreenName string
+	FullText   string
+}
+
+type UserTweet struct {
+	EntryID         string    `json:"entry_id"`
+	RestID          string    `json:"rest_id"`
+	FullText        string    `json:"full_text"`
+	QuoteCount      int64     `json:"quote_count"`
+	ReplyCount      int64     `json:"reply_count"`
+	RetweetCount    int64     `json:"retweet_count"`
+	FavoriteCount   int64     `json:"favorite_count"`
+	ViewCount       int64     `json:"view_count"`
+	CreatedAt       time.Time `json:"created_at"`
+	HashTags        []string  `json:"hashtags"`
+	Type            TweetType `json:"type"`
+	ReferenceRestID string    `json:"reference_rest_id"`
+}
+
+type UserTweetResult struct {
+	Tweets []*UserTweet
+	Cursor string
+	Totals int
+}
+
+func ParseUserTweets(userTweetResp *UserTweetsResponse) (tweets *UserTweetResult, err error) {
+	tweets = &UserTweetResult{}
 	if userTweetResp.StatusCode == 429 {
 		return nil, ErrTooManyRequests
 	}
@@ -52,10 +79,11 @@ func ParseUserTweets(userTweetResp *UserTweetsResponse) (tweets *UserTweets, err
 	for _, entry := range entries {
 		tweets.Totals = tweets.Totals + 1
 		entryID := entry.EntryID
-		isNormalTweet := strings.HasPrefix(entryID, NormalTweetPrefix)
+		entryType := entry.Content.EntryType
+		isPost := entryType == TimelineTimelineItem
 		isConversation := strings.HasPrefix(entryID, ConversationTweetPrefix)
-		hasNextPage := strings.HasPrefix(entryID, CursorPrefix)
-		if isNormalTweet || isConversation {
+		hasNextPage := strings.HasPrefix(entryID, CursorBottomPrefix)
+		if isPost || isConversation {
 			itemContent := entry.Content.ItemContent
 			if itemContent != nil {
 				result := entry.Content.ItemContent.TweetResults.Result
@@ -66,24 +94,24 @@ func ParseUserTweets(userTweetResp *UserTweetsResponse) (tweets *UserTweets, err
 					}
 					isRepost := result.Legacy.RetweetedStatusResult != nil
 					isQuote := result.QuotedStatusResult != nil
-					tweetType := TweetTypeNormal
+					tweetType := Post
 					referenceRestID := ""
 					if isRepost {
-						tweetType = TweetTypeRetweet
+						tweetType = Repost
 						if result.Legacy.RetweetedStatusResult.Result == nil {
 							continue
 						}
 						referenceRestID = result.Legacy.RetweetedStatusResult.Result.RestID
 					} else if isQuote {
-						tweetType = TweetTypeQuote
+						tweetType = Quote
 						if result.QuotedStatusResult.Result == nil {
 							continue
 						}
 						referenceRestID = result.QuotedStatusResult.Result.RestID
 					} else if isConversation {
-						tweetType = TweetTypeReply
+						tweetType = Reply
 					}
-					tweet := &Tweet{
+					tweet := &UserTweet{
 						EntryID:         entryID,
 						RestID:          result.RestID,
 						FullText:        result.Legacy.FullText,

@@ -60,6 +60,7 @@ type ItemContent struct {
 
 type EntryContent struct {
 	EntryType   string              `json:"entryType"`
+	DisplayType string              `json:"displayType"`
 	EntryID     string              `json:"entryId"`
 	ItemContent *ItemContent        `json:"itemContent"`
 	Items       []*CommentItemEntry `json:"items"`
@@ -70,6 +71,7 @@ type Entry struct {
 	EntryID string        `json:"entryId"`
 	Content *EntryContent `json:"content"`
 }
+
 type CommentLegacy struct {
 	FullText  string `json:"full_text"`
 	UserIDStr string `json:"user_id_str"`
